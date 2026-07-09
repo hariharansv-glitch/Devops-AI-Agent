@@ -54,12 +54,21 @@ def api_client(settings, monkeypatch) -> Iterator[TestClient]:
 
 
 class TestRoutes:
-    def test_root(self, api_client: TestClient) -> None:
+    def test_root_serves_ui(self, api_client: TestClient) -> None:
         response = api_client.get("/")
+        assert response.status_code == 200
+        ctype = response.headers.get("content-type", "")
+        assert ctype.startswith("text/html")
+        assert "DevOps Copilot" in response.text
+        assert "/chat" in response.text  # UI wires POST /chat inline
+
+    def test_api_info_returns_json(self, api_client: TestClient) -> None:
+        response = api_client.get("/api/info")
         assert response.status_code == 200
         body = response.json()
         assert body["name"] == "ai-devops-assistant"
         assert "/chat" in body["endpoints"]
+        assert body["model"] == "gemini-2.5-flash"
 
     def test_healthz(self, api_client: TestClient) -> None:
         response = api_client.get("/healthz")

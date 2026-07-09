@@ -2,22 +2,25 @@
 
 The API is intentionally minimal:
 
+* ``GET  /``                - single-page chat UI (``app/web/index.html``).
+* ``GET  /api/info``        - service index (self-describing JSON).
 * ``POST /chat``            - synchronous chat.
 * ``POST /chat/stream``     - streaming chat (SSE-friendly, plain text/event-stream).
 * ``GET  /healthz``         - liveness probe.
 * ``GET  /readyz``          - readiness probe (SSH reachable + agent ready).
-* ``GET  /``                - service index (self-describing JSON).
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.agent import AgentService, get_agent_service
@@ -25,6 +28,8 @@ from app.config import Settings, get_settings
 from app.schemas import ChatRequest, ChatResponse
 from app.services import get_services, reset_services
 from app.utils import configure_logging, get_logger
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 logger = get_logger(__name__)
 
@@ -80,6 +85,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     _register_routes(app)
+
+    # Mount /static for any additional web assets (icons, images, ...).
+    # The main index.html is served explicitly by the GET / handler so we can
+    # keep the API routes strictly above the static mount in match priority.
+    if WEB_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
     return app
 
 
@@ -91,14 +103,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 def _register_routes(app: FastAPI) -> None:
     """Attach every HTTP handler to ``app``."""
 
-    @app.get("/", tags=["meta"])
-    async def root() -> dict:
+    @app.get("/", tags=["ui"], include_in_schema=False)
+    async def root() -> FileResponse:
+        """Serve the chat UI."""
+        return FileResponse(WEB_DIR / "index.html")
+
+    @app.get("/api/info", tags=["meta"])
+    async def api_info(settings: Settings = Depends(get_settings)) -> dict:
+        """Return a self-describing JSON blob for the UI + external clients."""
         return {
             "name": "ai-devops-assistant",
             "version": __version__,
             "docs": "/docs",
             "openapi": "/openapi.json",
-            "endpoints": ["/chat", "/chat/stream", "/healthz", "/readyz"],
+            "endpoints": ["/chat", "/chat/stream", "/healthz", "/readyz", "/api/info"],
+            "model": settings.model_name,
+            "vm_host": settings.vm_host,
+            "vm_port": settings.vm_port,
+            "ssh_user": settings.vm_user,
+            "read_only_mode": settings.read_only_mode,
+            "app_env": settings.app_env,
         }
 
     @app.get("/healthz", tags=["meta"])
