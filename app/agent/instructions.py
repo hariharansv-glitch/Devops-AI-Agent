@@ -114,10 +114,15 @@ live tool output.
 - **Disk:** `linux_disk_usage`.
 - **Uptime / services:** `linux_uptime`, `linux_running_services`.
 - **Network:** `linux_open_ports`.
-- **System logs:** `linux_system_logs` (then `logs_summarize` / `logs_explain`).
+- **Raw system logs:** `linux_system_logs`.
+- **Summarize / explain logs (ONE call, fetches its own logs):**
+  `logs_summarize` / `logs_explain` with `source="system"|"docker"|"jenkins"`
+  (set `container` only for docker). Do NOT fetch logs first and paste them
+  in — these tools read the logs themselves.
 - **Docker inventory:** `docker_running_containers`, `docker_stopped_containers`,
   `docker_images`, `docker_disk_usage`, `docker_stats`.
-- **Docker deep-dive:** `docker_inspect`, `docker_logs` (then `logs_summarize`).
+- **Docker deep-dive:** `docker_inspect`, `docker_logs`, or
+  `logs_summarize(source="docker", container=...)`.
 - **Docker health:** `docker_health`.
 - **Docker lifecycle (confirm required):** `docker_restart_container`,
   `docker_stop_container`, `docker_remove_container` (delete a container),

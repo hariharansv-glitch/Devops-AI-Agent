@@ -238,7 +238,7 @@ class TestLogsHelpers:
 
 
 @pytest.mark.asyncio
-async def test_logs_summarize_buckets(tool_ctx):
+async def test_logs_summarize_buckets(fake_services, fake_ssh, tool_ctx):
     text = "\n".join(
         [
             "2024-01-01 INFO booted",
@@ -248,9 +248,25 @@ async def test_logs_summarize_buckets(tool_ctx):
             "2024-01-01 ERROR failed to open /etc/foo",
         ]
     )
-    result = await logs_summarize(text, 25, tool_ctx)
+    fake_ssh.register_substr("journalctl", FakeSSHResponse(stdout=text))
+    result = await logs_summarize("system", "", 200, 25, tool_ctx)
+    assert result["source"] == "system"
     assert result["counts"]["error"] == 2
     assert result["counts"]["critical"] == 1
     assert result["counts"]["warning"] == 1
     top = result["top_error_signatures"]
     assert top and top[0]["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_logs_summarize_docker_requires_container(fake_services, tool_ctx):
+    result = await logs_summarize("docker", "", 200, 25, tool_ctx)
+    assert result["status"] == "error"
+    assert "container" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_logs_summarize_unknown_source(fake_services, tool_ctx):
+    result = await logs_summarize("mystery", "", 200, 25, tool_ctx)
+    assert result["status"] == "error"
+    assert "unknown log source" in result["error"].lower()

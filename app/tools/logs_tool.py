@@ -1,12 +1,15 @@
 """ADK ``FunctionTool`` bindings for log summarisation and explanation.
 
-These tools are stateless helpers that structure raw log text into a shape
-Gemini can reason about. They don't call the LLM directly; the LLM invokes
-them to *prepare* the material it will summarise using its own reasoning.
+These tools fetch logs from a named source (system journal, a Docker
+container, or Jenkins) and structure them into a shape the LLM can reason
+about. Fetching happens *inside* the tool via a single call so weaker models
+never have to copy raw log text between two tool calls (a fragile hand-off
+that some models botch).
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter
 from typing import Any, Dict, List, Tuple
@@ -15,6 +18,9 @@ from google.adk.tools import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 
 from app.schemas import ToolError, ToolStatus
+from app.services import get_services
+from app.services.docker_service import DockerNotAvailable
+from app.services.ssh_service import SSHConnectionError
 from app.utils import get_logger, truncate_text
 
 logger = get_logger(__name__)
@@ -46,27 +52,33 @@ _NOISE_PATTERNS = (
 
 
 async def logs_summarize(
-    log_text: str,
+    source: str,
+    container: str,
+    lines: int,
     max_lines: int,
     tool_context: ToolContext,
 ) -> Dict[str, Any]:
-    """Bucket log lines by severity and surface the most frequent errors.
+    """Fetch logs from a source and bucket them by severity.
 
-    Use this tool right before answering questions like *"Analyze system logs"*
-    or *"What went wrong in Docker last night?"*. Feed the raw text captured
-    from ``linux_system_logs``, ``docker_logs``, or ``jenkins_logs``.
+    Use this for questions like *"Analyze the system logs"* or *"What went
+    wrong in the n8n container?"*. This tool fetches the logs itself - you do
+    NOT need to call another logs tool first.
 
     Args:
-        log_text: Raw log text.
-        max_lines: Maximum number of recent lines to keep per bucket
-            (1..200). 25 is a good default.
+        source: Where to read logs from. One of: ``"system"`` (the systemd
+            journal), ``"docker"`` (a container - set ``container``), or
+            ``"jenkins"``. Defaults to ``"system"`` when empty.
+        container: Container name or ID. Required only when ``source`` is
+            ``"docker"``; pass an empty string otherwise.
+        lines: How many recent log lines to fetch (1..2000). 200 is a good
+            default.
+        max_lines: Maximum lines to keep per severity bucket (1..200). 25 is
+            a good default.
     """
-    if not log_text or not log_text.strip():
-        return ToolError(
-            error="`log_text` is empty; nothing to summarise.",
-            tool="logs_summarize",
-            hint="Call a *_logs tool first to capture the text.",
-        ).model_dump()
+    fetched = await _fetch_logs("logs_summarize", source, container, lines)
+    if isinstance(fetched, dict):  # error payload
+        return fetched
+    log_text, resolved_source = fetched
 
     max_lines = max(1, min(int(max_lines or 25), 200))
 
@@ -98,6 +110,7 @@ async def logs_summarize(
 
     return {
         "status": ToolStatus.SUCCESS.value,
+        "source": resolved_source,
         "total_kept": total_lines,
         "counts": {name: len(entries) for name, entries in buckets.items()},
         "buckets": buckets,
@@ -106,29 +119,32 @@ async def logs_summarize(
 
 
 async def logs_explain(
-    log_text: str,
+    source: str,
+    container: str,
+    lines: int,
     focus: str,
     tool_context: ToolContext,
 ) -> Dict[str, Any]:
-    """Return a structured hand-off for the LLM to explain a log excerpt.
+    """Fetch logs from a source and package them for the LLM to explain.
 
-    The tool does **not** paraphrase the log by itself; that reasoning is
-    Gemini's job. Instead it packages the excerpt (truncated to a safe
-    length), the caller's ``focus`` instruction, and useful hints (severity
-    counts, timestamps observed) so the LLM has a compact, well-labelled
-    payload to reason over.
+    This tool fetches the logs itself - you do NOT need to call another logs
+    tool first. It does not paraphrase; it returns a compact, labelled excerpt
+    (plus severity counts and timestamps) for you to reason over honestly.
 
     Args:
-        log_text: Raw log text to explain.
-        focus: Free-form guidance describing what the user cares about
-            (e.g. ``"authentication failures in the last hour"``). Empty
-            string means: give a general explanation.
+        source: Where to read logs from. One of ``"system"``, ``"docker"``
+            (set ``container``), or ``"jenkins"``. Defaults to ``"system"``.
+        container: Container name or ID. Required only when ``source`` is
+            ``"docker"``; pass an empty string otherwise.
+        lines: How many recent log lines to fetch (1..2000). 200 is a good
+            default.
+        focus: Free-form guidance describing what the user cares about (e.g.
+            ``"authentication failures"``). Empty string means general.
     """
-    if not log_text or not log_text.strip():
-        return ToolError(
-            error="`log_text` is empty; nothing to explain.",
-            tool="logs_explain",
-        ).model_dump()
+    fetched = await _fetch_logs("logs_explain", source, container, lines)
+    if isinstance(fetched, dict):  # error payload
+        return fetched
+    log_text, resolved_source = fetched
 
     excerpt = truncate_text(log_text, max_chars=6000, tail=True)
     counts: Counter[str] = Counter()
@@ -141,6 +157,7 @@ async def logs_explain(
 
     return {
         "status": ToolStatus.SUCCESS.value,
+        "source": resolved_source,
         "focus": (focus or "").strip() or "general",
         "excerpt": excerpt,
         "severity_counts": dict(counts),
@@ -163,6 +180,71 @@ def build_logs_tools() -> List[FunctionTool]:
         FunctionTool(func=logs_summarize),
         FunctionTool(func=logs_explain),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Log fetching
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_logs(
+    tool: str,
+    source: str,
+    container: str,
+    lines: int,
+):
+    """Fetch raw log text from the requested source.
+
+    Returns a ``(log_text, resolved_source)`` tuple on success, or a
+    ``ToolError`` dict on failure (empty logs, bad args, SSH/Docker errors).
+    """
+    resolved = (source or "system").strip().lower()
+    lines = max(1, min(int(lines or 200), 2000))
+    services = get_services()
+
+    try:
+        if resolved in {"system", "syslog", "journal", ""}:
+            resolved = "system"
+            text = await asyncio.to_thread(
+                services.linux.system_logs, lines=lines, priority="err"
+            )
+        elif resolved in {"docker", "container"}:
+            resolved = "docker"
+            if not container or not container.strip():
+                return ToolError(
+                    error="`container` is required when source='docker'.",
+                    tool=tool,
+                    hint="Pass the container name/ID, e.g. container='n8n'.",
+                ).model_dump()
+            text = await asyncio.to_thread(
+                services.docker.logs, container.strip(), tail=lines
+            )
+        elif resolved == "jenkins":
+            text = await asyncio.to_thread(services.jenkins.logs, lines=lines)
+        else:
+            return ToolError(
+                error=f"Unknown log source {source!r}.",
+                tool=tool,
+                hint="Use one of: 'system', 'docker', 'jenkins'.",
+            ).model_dump()
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool=tool).model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return ToolError(
+            error=f"{tool} could not fetch {resolved} logs",
+            detail=str(exc),
+            tool=tool,
+            hint="Verify SSH connectivity (and Docker, for container logs).",
+        ).model_dump()
+
+    if not text or not text.strip():
+        return ToolError(
+            error=f"No {resolved} log lines were returned.",
+            tool=tool,
+            hint="The source may have no recent entries at this priority.",
+        ).model_dump()
+
+    return text, resolved
 
 
 # ---------------------------------------------------------------------------

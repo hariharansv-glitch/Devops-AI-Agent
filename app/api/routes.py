@@ -13,6 +13,7 @@ The API is intentionally minimal:
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -30,6 +31,68 @@ from app.services import get_services, reset_services
 from app.utils import configure_logging, get_logger
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+def _friendly_llm_error(exc: BaseException) -> tuple[str, int]:
+    """Translate a raw LLM/provider exception into a clean message + HTTP code.
+
+    Rate-limit and overload errors are common on free tiers; surfacing the
+    provider's giant JSON blob to the UI is unhelpful. We detect the usual
+    cases and return a short, actionable sentence instead.
+    """
+    msg = str(exc).lower()
+
+    # Extract a "try again in Xs / Xm" hint if the provider gave one.
+    hint = ""
+    match = re.search(
+        r"try again in\s*((?:\d+m)?\d+(?:\.\d+)?s)", str(exc), re.IGNORECASE
+    )
+    if match:
+        hint = f" Try again in ~{match.group(1)}."
+
+    is_rate_limit = (
+        "rate limit" in msg
+        or "rate_limit_exceeded" in msg
+        or "resource_exhausted" in msg
+        or "429" in msg
+    )
+    if is_rate_limit:
+        scope = ""
+        if "per day" in msg or "tpd" in msg or "requestsperday" in msg:
+            scope = " (daily quota)"
+        elif "per minute" in msg or "tpm" in msg or "perminute" in msg:
+            scope = " (per-minute quota)"
+        return (
+            f"The LLM provider's free-tier rate limit was reached{scope}.{hint} "
+            "Switch MODEL_NAME to a model with more headroom, or add billing to "
+            "your provider account.",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
+    if "unavailable" in msg or "503" in msg or "high demand" in msg:
+        return (
+            "The LLM provider is temporarily overloaded (503). "
+            "Please retry in a moment.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    if "tool_use_failed" in msg or "failed to call a function" in msg:
+        return (
+            "The model produced a malformed tool call. Please rephrase your "
+            "request or try again.",
+            status.HTTP_502_BAD_GATEWAY,
+        )
+
+    if "api key" in msg or "unauthorized" in msg or "401" in msg or "permission" in msg:
+        return (
+            "The LLM provider rejected the API key. Check the key for the "
+            "configured MODEL_NAME provider in your .env.",
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Fallback: keep it short, don't dump the whole stack/JSON.
+    first_line = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+    return (f"Agent error: {first_line[:300]}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 logger = get_logger(__name__)
 
@@ -179,10 +242,8 @@ def _register_routes(app: FastAPI) -> None:
             ) from exc
         except Exception as exc:  # noqa: BLE001 - never leak internals
             logger.opt(exception=True).error("chat handler failed")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"agent error: {exc}",
-            ) from exc
+            detail, http_code = _friendly_llm_error(exc)
+            raise HTTPException(status_code=http_code, detail=detail) from exc
 
         return ChatResponse(
             answer=reply.answer,

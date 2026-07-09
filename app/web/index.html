@@ -980,8 +980,16 @@
             }),
           });
           if (!resp.ok) {
-            const body = await resp.text().catch(() => resp.statusText);
-            throw new Error(`HTTP ${resp.status}: ${body}`);
+            // FastAPI returns {"detail": "..."} - surface just that clean
+            // message instead of the raw JSON / provider stack trace.
+            let detail = resp.statusText;
+            try {
+              const errJson = await resp.json();
+              detail = errJson.detail || JSON.stringify(errJson);
+            } catch (_) {
+              detail = (await resp.text().catch(() => resp.statusText)) || resp.statusText;
+            }
+            throw new Error(detail);
           }
           const reply = await resp.json();
           thinking.remove();
