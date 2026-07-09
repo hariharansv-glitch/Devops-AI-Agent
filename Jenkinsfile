@@ -50,7 +50,11 @@ pipeline {
         HOST_PORT = '5500'
 
         // ---- Which LLM the agent uses (see .env.example for options) ----
-        MODEL_NAME = 'groq/llama-3.3-70b-versatile'
+        // llama-4-scout uses Groq's tool-calling channel correctly (30k TPM,
+        // 500k TPD). Avoid llama-3.3-70b-versatile here: it periodically emits
+        // tool invocations as literal `<function/tool></function>` text
+        // instead of via the tool channel, producing empty answers in the UI.
+        MODEL_NAME = 'groq/meta-llama/llama-4-scout-17b-16e-instruct'
 
         // ---- Target Linux VM the agent inspects over SSH ----
         // Because docker-compose runs the container with `network_mode: host`,
