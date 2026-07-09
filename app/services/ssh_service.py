@@ -277,13 +277,15 @@ class SSHService:
                     f"VM_PRIVATE_KEY points to non-existent path: {key_path}"
                 )
 
-        # Try all standard key classes in order of prevalence.
-        loaders: List[type[paramiko.PKey]] = [
-            paramiko.Ed25519Key,
-            paramiko.RSAKey,
-            paramiko.ECDSAKey,
-            paramiko.DSSKey,
-        ]
+        # Try all standard key classes in order of prevalence. We resolve them
+        # via ``getattr`` so we degrade gracefully when a future paramiko
+        # release removes a key type (paramiko 5.0 already dropped ``DSSKey``,
+        # since DSA is insecure).
+        loaders: List[type[paramiko.PKey]] = []
+        for candidate_name in ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey"):
+            candidate = getattr(paramiko, candidate_name, None)
+            if candidate is not None:
+                loaders.append(candidate)
         last_exc: Exception | None = None
         for loader in loaders:
             try:

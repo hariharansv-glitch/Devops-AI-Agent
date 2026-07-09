@@ -64,6 +64,17 @@ def configure_logging(
     """
     global _CONFIGURED
     with _LOCK:
+        # Windows: force UTF-8 on stdout/stderr so Loguru (and any downstream
+        # consumer of these streams) can safely emit unicode box drawings,
+        # emoji, and non-ASCII log values. No-op on POSIX.
+        if sys.platform == "win32":
+            for _stream in (sys.stdout, sys.stderr):
+                if _stream is not None and hasattr(_stream, "reconfigure"):
+                    try:
+                        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+                    except Exception:  # pragma: no cover - best-effort
+                        pass
+
         _loguru_logger.remove()
 
         if json_logs:

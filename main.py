@@ -17,6 +17,19 @@ import sys
 import uuid
 from typing import Optional
 
+# --- Windows: force UTF-8 stdout/stderr BEFORE any Rich import writes.
+# Windows' legacy cp1252 codec cannot encode the Unicode box-drawing
+# characters that Rich uses for panels, rules, and markdown. Reconfiguring
+# stdout is a no-op on POSIX where the encoding is already utf-8.
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:  # pragma: no cover - best-effort
+                pass
+
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
@@ -36,7 +49,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
 )
-console = Console()
+console = Console(legacy_windows=False)
 logger = get_logger(__name__)
 
 
