@@ -1,0 +1,48 @@
+# =============================================================================
+# AI DevOps Assistant - Docker Compose
+# =============================================================================
+# Usage:
+#   1. Copy .env.example to .env and fill in your Gemini key + VM credentials.
+#   2. docker compose up --build
+#   3. Open http://localhost:8000/docs for the OpenAPI UI.
+#
+# If you use an SSH private key for the VM, mount it read-only into the
+# container and point VM_PRIVATE_KEY at the mounted path (see below).
+# =============================================================================
+
+services:
+  devops-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-devops-assistant:latest
+    container_name: ai-devops-assistant
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Persist logs on the host.
+      - ./logs:/app/logs
+      # OPTIONAL: mount a read-only SSH private key at a known path.
+      # Uncomment the next two lines and set VM_PRIVATE_KEY=/keys/id_ed25519
+      # in your .env file to use it.
+      # - ./keys:/keys:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
