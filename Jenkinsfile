@@ -118,29 +118,36 @@ pipeline {
                     set -e
 
                     # Stage the private key in the workspace with world-read
-                    # (644) so the busybox helper below can copy it. We use 644
-                    # instead of 600 because paramiko (unlike OpenSSH) does not
-                    # enforce mode, and the file only lives on disk for the
-                    # duration of this stage before being copied into a Docker
-                    # volume.
+                    # (644) so we can stream it to the helper container. 644 is
+                    # safe because the workspace is ephemeral and paramiko
+                    # (unlike OpenSSH) does not enforce mode.
                     mkdir -p keys
                     install -m 644 "$VM_KEY_FILE" keys/target_vm_key
 
-                    # Copy the key into a NAMED VOLUME (devops_keys) so it
-                    # survives the `post { always }` workspace cleanup. The
-                    # volume is mounted read-only into the app container by
-                    # docker-compose.yml. `docker volume create` is idempotent,
-                    # so this is safe on every rebuild. Setting mode 644 on the
-                    # copy inside the volume keeps it readable by the container's
-                    # non-root `app` user (uid 1000) regardless of host uid.
+                    # Sanity-check: an empty key file would produce a very
+                    # confusing SSH failure later, so fail fast right here.
+                    if [ ! -s keys/target_vm_key ]; then
+                        echo "ERROR: keys/target_vm_key is empty. The 'opc' Jenkins credential is likely missing the private key body." >&2
+                        exit 1
+                    fi
+
+                    # Populate the NAMED VOLUME (devops_keys) by piping the key
+                    # over Docker's socket via stdin. Do NOT use `-v $PWD/keys:/src`
+                    # here: when Jenkins itself runs inside a container (as here),
+                    # the workspace lives on a Docker volume and is NOT a host
+                    # path, so bind mounts from it silently mount an empty
+                    # directory. The stdin approach side-steps that entirely.
+                    # `docker volume create` is idempotent, so this is safe on
+                    # every rebuild. mode 644 on the copy keeps it readable by
+                    # the container's non-root `app` user (uid 1000).
                     docker volume create devops_keys >/dev/null
-                    docker run --rm \
+                    docker run --rm -i \
                         -v devops_keys:/dest \
-                        -v "$(pwd)/keys":/src:ro \
                         busybox:latest sh -c '
-                            cp /src/target_vm_key /dest/target_vm_key &&
-                            chmod 644 /dest/target_vm_key
-                        '
+                            cat > /dest/target_vm_key &&
+                            chmod 644 /dest/target_vm_key &&
+                            echo "Key written to volume ($(wc -c < /dest/target_vm_key) bytes)"
+                        ' < keys/target_vm_key
 
                     # Prefer the username attached to the credential; fall back
                     # to the pipeline default if the credential has none.
