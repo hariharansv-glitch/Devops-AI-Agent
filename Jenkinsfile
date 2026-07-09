@@ -20,9 +20,9 @@
 // web UI at /.
 //
 // ---- Jenkins credentials this pipeline expects ----
-//   * groq-api-key        (Secret text)                -> GROQ_API_KEY
-//   * devops-target-vm-key(SSH Username with private key) -> the key + user
-//                          used by the agent to SSH into the managed VM.
+//   * groq-api-key    (Secret text)                    -> GROQ_API_KEY
+//   * blackstraw-git  (SSH Username with private key)   -> the key + user
+//                      used by the agent to SSH into the managed VM.
 // Create them under: Manage Jenkins > Credentials. If you use Gemini
 // instead of Groq, swap the credential for a `google-api-key` secret and
 // set MODEL_NAME accordingly below.
@@ -101,7 +101,7 @@ pipeline {
                 // credentials so nothing sensitive is ever committed or echoed.
                 withCredentials([
                     sshUserPrivateKey(
-                        credentialsId: 'devops-target-vm-key',
+                        credentialsId: 'blackstraw-git',
                         keyFileVariable: 'VM_KEY_FILE',
                         usernameVariable: 'VM_KEY_USER'
                     ),
