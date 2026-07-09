@@ -85,6 +85,50 @@ def _retry_wait_seconds(exc: BaseException, attempt: int) -> float:
     idx = min(attempt, len(_DEFAULT_BACKOFF_S) - 1)
     return min(_DEFAULT_BACKOFF_S[idx], _MAX_RETRY_WAIT_S)
 
+def _salvage_failed_generation(exc: BaseException) -> Optional[str]:
+    """Recover a usable answer from a Groq ``tool_use_failed`` error.
+
+    Some Groq-hosted models (notably ``llama-4-scout``) occasionally emit
+    their *final prose answer* through the function-calling channel. Groq's
+    strict grammar rejects it as ``tool_use_failed`` but helpfully echoes the
+    model's output back in ``failed_generation``. When that echoed output is
+    plain prose (not an actual, malformed tool call), it's the real answer -
+    so we surface it instead of throwing the whole turn away.
+
+    Returns the salvaged text, or ``None`` if nothing safe can be recovered.
+    """
+    msg = str(exc)
+    if "tool_use_failed" not in msg:
+        return None
+    start = msg.find('{"error"')
+    if start == -1:
+        return None
+    blob = msg[start:]
+    end = blob.rfind("}")
+    if end != -1:
+        blob = blob[: end + 1]
+    try:
+        data = json.loads(blob)
+    except (ValueError, TypeError):
+        return None
+    fg = data.get("error", {}).get("failed_generation")
+    if not isinstance(fg, str):
+        return None
+    text = fg.strip()
+    if not text:
+        return None
+    # Reject anything that still looks like a (malformed) tool call rather
+    # than a natural-language answer.
+    lowered = text.lower()
+    if "<function=" in lowered:
+        return None
+    if text.startswith("{") or text.startswith("["):
+        return None
+    if '"name"' in lowered and '"parameters"' in lowered:
+        return None
+    return text
+
+
 from app.agent.callbacks import tool_calls_from_state
 from app.agent.instructions import AGENT_NAME
 from app.agent.memory import build_memory_service, ingest_session
@@ -203,6 +247,14 @@ class AgentService:
                             final_text = candidate
                 break
             except Exception as exc:  # noqa: BLE001 - selective retry below
+                salvaged = _salvage_failed_generation(exc)
+                if salvaged:
+                    logger.warning(
+                        "salvaged answer from tool_use_failed (model emitted "
+                        "prose in the tool channel); surfacing it to the user"
+                    )
+                    final_text = salvaged
+                    break
                 if attempt >= _MAX_RETRIES or not _is_transient_llm_error(exc):
                     raise
                 delay = _retry_wait_seconds(exc, attempt)
