@@ -186,6 +186,48 @@ class TestDockerService:
         with pytest.raises(ValueError):
             docker.logs("bad ref;rm -rf /", tail=10)
 
+    def test_remove_container_builds_command(self, fake_ssh: FakeSSHService) -> None:
+        self._install_common(fake_ssh)
+        fake_ssh.register_substr("docker rm -f n8n", FakeSSHResponse(stdout="n8n\n"))
+        docker = DockerService(fake_ssh)  # type: ignore[arg-type]
+        result = docker.remove_container("n8n", force=True)
+        assert result["status"] == "success"
+        assert result["operation"] == "remove_container"
+
+    def test_run_container_builds_command(self, fake_ssh: FakeSSHService) -> None:
+        self._install_common(fake_ssh)
+        fake_ssh.register_substr("docker run", FakeSSHResponse(stdout="abcdef123456\n"))
+        docker = DockerService(fake_ssh)  # type: ignore[arg-type]
+        result = docker.run_container(
+            "nginx:latest", name="web", ports="8080:80", env="TZ=UTC"
+        )
+        assert result["status"] == "success"
+        assert result["name"] == "web"
+
+    def test_run_container_rejects_bad_image(self, fake_ssh: FakeSSHService) -> None:
+        import pytest
+
+        self._install_common(fake_ssh)
+        docker = DockerService(fake_ssh)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            docker.run_container("nginx; rm -rf /")
+
+    def test_run_container_rejects_bad_port(self, fake_ssh: FakeSSHService) -> None:
+        import pytest
+
+        self._install_common(fake_ssh)
+        docker = DockerService(fake_ssh)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            docker.run_container("nginx:latest", ports="80;evil")
+
+    def test_run_container_rejects_bad_env(self, fake_ssh: FakeSSHService) -> None:
+        import pytest
+
+        self._install_common(fake_ssh)
+        docker = DockerService(fake_ssh)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            docker.run_container("nginx:latest", env="FOO=$(whoami)")
+
 
 # ---------------------------------------------------------------------------
 # Jenkins service

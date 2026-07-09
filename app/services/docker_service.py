@@ -222,6 +222,114 @@ class DockerService:
             "stderr": res.stderr,
         }
 
+    def stop_container(self, container: str, *, timeout: int = 10) -> Dict[str, Any]:
+        """Stop a running container with ``docker stop`` (destructive)."""
+        self._require_docker()
+        _validate_ref(container)
+        res = self._ssh.execute(
+            f"{self._docker_bin} stop -t {int(timeout)} {container}"
+        )
+        return self._op_result("stop_container", container, res)
+
+    def start_container(self, container: str) -> Dict[str, Any]:
+        """Start an existing stopped container with ``docker start``."""
+        self._require_docker()
+        _validate_ref(container)
+        res = self._ssh.execute(f"{self._docker_bin} start {container}")
+        return self._op_result("start_container", container, res)
+
+    def remove_container(self, container: str, *, force: bool = False) -> Dict[str, Any]:
+        """Remove a container with ``docker rm`` (destructive, data loss).
+
+        Args:
+            container: Container name or ID.
+            force: When ``True``, pass ``-f`` so a running container is killed
+                and removed in one step.
+        """
+        self._require_docker()
+        _validate_ref(container)
+        flag = "-f " if force else ""
+        res = self._ssh.execute(f"{self._docker_bin} rm {flag}{container}")
+        return self._op_result("remove_container", container, res)
+
+    def pull_image(self, image: str) -> Dict[str, Any]:
+        """Pull an image with ``docker pull``."""
+        self._require_docker()
+        _validate_image(image)
+        res = self._ssh.execute(f"{self._docker_bin} pull {image}")
+        return {
+            "status": ToolStatus.SUCCESS.value if res.exit_code == 0 else ToolStatus.ERROR.value,
+            "image": image,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+
+    def run_container(
+        self,
+        image: str,
+        *,
+        name: Optional[str] = None,
+        ports: Optional[str] = None,
+        env: Optional[str] = None,
+        restart: str = "unless-stopped",
+        detach: bool = True,
+    ) -> Dict[str, Any]:
+        """Create and start a new container with ``docker run`` (destructive).
+
+        Args:
+            image: Image reference, e.g. ``nginx:latest`` or
+                ``registry.example.com/org/app:1.2.3``.
+            name: Optional container name.
+            ports: Comma-separated ``host:container`` port mappings, e.g.
+                ``"8080:80,4500:4500"``. Each side must be numeric.
+            env: Comma-separated ``KEY=value`` pairs, e.g. ``"TZ=UTC,DEBUG=1"``.
+                Values may not contain shell metacharacters.
+            restart: Restart policy (``no``, ``on-failure``, ``always``,
+                ``unless-stopped``).
+            detach: Run detached (``-d``). Almost always ``True`` for services.
+        """
+        self._require_docker()
+        _validate_image(image)
+
+        parts: List[str] = [self._docker_bin, "run"]
+        if detach:
+            parts.append("-d")
+        if name:
+            _validate_ref(name)
+            parts += ["--name", name]
+        if restart:
+            if restart not in {"no", "on-failure", "always", "unless-stopped"}:
+                raise ValueError(f"Unsupported restart policy: {restart!r}")
+            parts += ["--restart", restart]
+        for mapping in _split_csv(ports):
+            _validate_port_mapping(mapping)
+            parts += ["-p", mapping]
+        for pair in _split_csv(env):
+            _validate_env_pair(pair)
+            parts += ["-e", pair]
+        parts.append(image)
+
+        res = self._ssh.execute(" ".join(parts))
+        return {
+            "status": ToolStatus.SUCCESS.value if res.exit_code == 0 else ToolStatus.ERROR.value,
+            "image": image,
+            "name": name,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+
+    def _op_result(self, op: str, container: str, res: Any) -> Dict[str, Any]:
+        return {
+            "status": ToolStatus.SUCCESS.value if res.exit_code == 0 else ToolStatus.ERROR.value,
+            "operation": op,
+            "container": container,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+
     # ---------------------------------------------------------------- Internals
     def _require_docker(self) -> None:
         if not self.is_installed():
@@ -272,6 +380,10 @@ class DockerService:
 
 
 _REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
+# Image refs allow registry host, path, tag and digest: registry:5000/org/app:1.2@sha256:...
+_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:@\-]{0,255}$")
+_PORT_PATTERN = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}:)?\d{1,5}:\d{1,5}(?:/(?:tcp|udp))?$")
+_ENV_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[^;&|`$<>\n\\]*$")
 
 
 def _validate_ref(name: str) -> None:
@@ -280,6 +392,37 @@ def _validate_ref(name: str) -> None:
         raise ValueError(
             f"Invalid Docker reference {name!r}. Names must match {_REF_PATTERN.pattern}."
         )
+
+
+def _validate_image(image: str) -> None:
+    """Validate a Docker image reference to prevent shell injection."""
+    if not image or not _IMAGE_PATTERN.match(image):
+        raise ValueError(
+            f"Invalid Docker image {image!r}. Must match {_IMAGE_PATTERN.pattern}."
+        )
+
+
+def _validate_port_mapping(mapping: str) -> None:
+    """Validate a single ``[host_ip:]host:container[/proto]`` port mapping."""
+    if not _PORT_PATTERN.match(mapping):
+        raise ValueError(
+            f"Invalid port mapping {mapping!r}. Use HOST:CONTAINER, e.g. '8080:80'."
+        )
+
+
+def _validate_env_pair(pair: str) -> None:
+    """Validate a single ``KEY=value`` environment pair (no shell metachars)."""
+    if not _ENV_PATTERN.match(pair):
+        raise ValueError(
+            f"Invalid env pair {pair!r}. Use KEY=value without shell metacharacters."
+        )
+
+
+def _split_csv(value: Optional[str]) -> List[str]:
+    """Split a comma-separated argument string into trimmed, non-empty items."""
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _parse_json_lines(output: str) -> List[Dict[str, Any]]:

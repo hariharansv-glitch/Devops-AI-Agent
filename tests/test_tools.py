@@ -10,7 +10,10 @@ from app.schemas import ToolStatus
 from app.tools.docker_tool import (
     docker_health,
     docker_prune,
+    docker_remove_container,
     docker_restart_container,
+    docker_run_container,
+    docker_stop_container,
 )
 from app.tools.jenkins_tool import jenkins_restart, jenkins_status
 from app.tools.linux_tool import (
@@ -163,6 +166,36 @@ async def test_docker_prune_requires_confirmation(fake_services, tool_ctx):
     result = await docker_prune("system", False, False, tool_ctx)
     assert result["status"] == ToolStatus.CONFIRMATION_REQUIRED.value
     assert "prune" in result["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_docker_remove_requires_confirmation(fake_services, tool_ctx):
+    result = await docker_remove_container("n8n", False, False, tool_ctx)
+    assert result["status"] == ToolStatus.CONFIRMATION_REQUIRED.value
+    assert "remove" in result["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_docker_remove_blocked_in_readonly(fake_services, tool_ctx):
+    # confirm=True but READ_ONLY_MODE is on (default in the fake settings).
+    result = await docker_remove_container("n8n", True, True, tool_ctx)
+    assert result["status"] == ToolStatus.BLOCKED.value
+
+
+@pytest.mark.asyncio
+async def test_docker_stop_requires_confirmation(fake_services, tool_ctx):
+    result = await docker_stop_container("n8n", False, tool_ctx)
+    assert result["status"] == ToolStatus.CONFIRMATION_REQUIRED.value
+    assert "stop" in result["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_docker_run_requires_confirmation(fake_services, tool_ctx):
+    result = await docker_run_container(
+        "nginx:latest", "web", "8080:80", "", False, tool_ctx
+    )
+    assert result["status"] == ToolStatus.CONFIRMATION_REQUIRED.value
+    assert "create" in result["prompt"].lower()
 
 
 # ---------------------------------------------------------------------------

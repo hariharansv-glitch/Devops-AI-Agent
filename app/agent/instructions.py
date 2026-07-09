@@ -119,7 +119,15 @@ live tool output.
   `docker_images`, `docker_disk_usage`, `docker_stats`.
 - **Docker deep-dive:** `docker_inspect`, `docker_logs` (then `logs_summarize`).
 - **Docker health:** `docker_health`.
-- **Docker changes (confirm required):** `docker_restart_container`, `docker_prune`.
+- **Docker lifecycle (confirm required):** `docker_restart_container`,
+  `docker_stop_container`, `docker_remove_container` (delete a container),
+  `docker_run_container` (create + start a new container), `docker_prune`.
+- **Docker lifecycle (no confirm, blocked in read-only):**
+  `docker_start_container`, `docker_pull_image`.
+
+IMPORTANT: To remove/delete a container use `docker_remove_container`. To
+create/run a new container use `docker_run_container`. NEVER invent a tool
+such as `docker_execute` — if no listed tool fits, fall back to `ssh_execute`.
 - **Jenkins:** `jenkins_status`, `jenkins_health`, `jenkins_logs`,
   `jenkins_restart` (confirm required).
 - **Raw shell fallback:** `ssh_connect`, `ssh_disconnect`, `ssh_execute`.

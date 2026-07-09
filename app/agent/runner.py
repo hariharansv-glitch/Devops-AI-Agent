@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -27,29 +28,61 @@ from google.genai import types
 from google.genai import errors as genai_errors
 
 # --- Transient-error retry policy -------------------------------------------
-# Google's Gemini endpoints occasionally return 5xx / UNAVAILABLE when a
-# specific model is under sudden load. Those are safe to retry — the request
-# never reached tool execution — so we back off briefly and try again a
-# couple of times before surfacing the error to the caller.
-_TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}
-_TRANSIENT_RETRY_BACKOFF_S = (1.5, 3.5, 7.0)  # up to 3 retries; ~12s max wait
+# LLM endpoints (Gemini, Groq via LiteLLM, ...) intermittently fail with
+# errors that are safe to retry because the request never reached tool
+# execution:
+#   * 5xx / UNAVAILABLE  - the provider is momentarily overloaded.
+#   * 429 rate limit     - per-minute token/request budget hit; the provider
+#                          tells us how long to wait ("try again in 18s").
+# We back off and retry a few times before surfacing the error to the caller.
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504, 529}
+_MAX_RETRIES = 3
+_DEFAULT_BACKOFF_S = (2.0, 5.0, 9.0)  # used when no explicit hint is given
+_MAX_RETRY_WAIT_S = 30.0  # never block a request longer than this per wait
+
+# Matches the retry hints providers embed in their error strings, e.g.
+# "Please try again in 18.125s", "retry in 5s", "retryDelay: '21s'".
+_RETRY_HINT_RE = re.compile(
+    r"(?:try again in|retry in|retrydelay['\":\s]*)\s*'?(\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
 
 
 def _is_transient_llm_error(exc: BaseException) -> bool:
-    """Return True if ``exc`` is a Gemini 5xx / UNAVAILABLE style failure."""
+    """Return True if ``exc`` is a retryable 5xx / 429 / UNAVAILABLE failure."""
     if isinstance(exc, genai_errors.ServerError):
         return True
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
     if isinstance(code, int) and code in _TRANSIENT_STATUS_CODES:
         return True
-    # ADK wraps 5xx in its own exception types; match by message as fallback.
+    # ADK / LiteLLM wrap provider errors in their own types; match by message.
     msg = str(exc).lower()
     return (
         "unavailable" in msg
         or "503" in msg
         or "deadline exceeded" in msg
         or "internal error" in msg
+        or "rate limit" in msg
+        or "rate_limit_exceeded" in msg
+        or "ratelimiterror" in msg
+        or "resource_exhausted" in msg
+        or "429" in msg
     )
+
+
+def _retry_wait_seconds(exc: BaseException, attempt: int) -> float:
+    """Return how long to wait before retry ``attempt`` (0-indexed).
+
+    Prefers the provider's own "try again in Xs" hint (so we wait out a
+    per-minute rate window precisely), falling back to a fixed backoff.
+    The result is capped at :data:`_MAX_RETRY_WAIT_S`.
+    """
+    match = _RETRY_HINT_RE.search(str(exc))
+    if match:
+        # +0.5s cushion so we land just past the provider's window.
+        return min(float(match.group(1)) + 0.5, _MAX_RETRY_WAIT_S)
+    idx = min(attempt, len(_DEFAULT_BACKOFF_S) - 1)
+    return min(_DEFAULT_BACKOFF_S[idx], _MAX_RETRY_WAIT_S)
 
 from app.agent.callbacks import tool_calls_from_state
 from app.agent.instructions import AGENT_NAME
@@ -169,14 +202,14 @@ class AgentService:
                             final_text = candidate
                 break
             except Exception as exc:  # noqa: BLE001 - selective retry below
-                if attempt >= len(_TRANSIENT_RETRY_BACKOFF_S) or not _is_transient_llm_error(exc):
+                if attempt >= _MAX_RETRIES or not _is_transient_llm_error(exc):
                     raise
-                delay = _TRANSIENT_RETRY_BACKOFF_S[attempt]
+                delay = _retry_wait_seconds(exc, attempt)
                 attempt += 1
                 logger.warning(
-                    "transient LLM error, retry {n}/{total} in {d}s: {err}",
+                    "transient LLM error, retry {n}/{total} in {d:.1f}s: {err}",
                     n=attempt,
-                    total=len(_TRANSIENT_RETRY_BACKOFF_S),
+                    total=_MAX_RETRIES,
                     d=delay,
                     err=str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
                 )

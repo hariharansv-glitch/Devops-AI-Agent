@@ -14,7 +14,10 @@ class TestSettings:
         monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
         get_settings.cache_clear()
 
-        settings = Settings()
+        # Ignore the developer's local .env - this test asserts the code
+        # defaults, which a real .env may legitimately override (e.g.
+        # READ_ONLY_MODE=FALSE or a groq/* MODEL_NAME).
+        settings = Settings(_env_file=None)
 
         assert settings.read_only_mode is True
         assert settings.vm_port == 22
@@ -44,6 +47,20 @@ class TestSettings:
     def test_vertex_requires_project(self) -> None:
         with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
             Settings(google_genai_use_vertexai=True, google_cloud_project=None)
+
+    @pytest.mark.parametrize(
+        "model_name, expected",
+        [
+            ("gemini-2.5-flash", "gemini"),
+            ("gemini-2.5-flash-lite", "gemini"),
+            ("groq/llama-3.3-70b-versatile", "groq"),
+            ("openai/gpt-4o-mini", "openai"),
+            ("anthropic/claude-3-5-sonnet", "anthropic"),
+            ("", "gemini"),
+        ],
+    )
+    def test_llm_provider_inference(self, model_name: str, expected: str) -> None:
+        assert Settings(model_name=model_name).llm_provider == expected
 
     def test_settings_singleton_is_cached(
         self, monkeypatch: pytest.MonkeyPatch

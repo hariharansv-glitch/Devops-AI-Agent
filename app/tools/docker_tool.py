@@ -236,6 +236,178 @@ async def docker_prune(
     return result
 
 
+async def docker_stop_container(
+    container: str,
+    confirm: bool,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Stop a running Docker container (destructive; requires confirmation).
+
+    Args:
+        container: Container name or ID.
+        confirm: MUST be ``true`` and only after the user has explicitly agreed.
+    """
+    services = get_services()
+    if not confirm:
+        return ConfirmationRequired(
+            action="docker.stop_container",
+            target=container,
+            prompt=(
+                f"I am about to STOP Docker container {container!r} on "
+                f"{services.settings.vm_host}. Do you want to continue?"
+            ),
+            reversible=True,
+        ).model_dump()
+    if services.settings.read_only_mode:
+        return _read_only("docker_stop_container")
+    try:
+        return await asyncio.to_thread(services.docker.stop_container, container)
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool="docker_stop_container").model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return _err("docker_stop_container", exc)
+
+
+async def docker_start_container(
+    container: str,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Start an existing stopped container. Non-destructive; no data is lost.
+
+    Still blocked in READ_ONLY_MODE because it changes server state.
+
+    Args:
+        container: Container name or ID.
+    """
+    services = get_services()
+    if services.settings.read_only_mode:
+        return _read_only("docker_start_container")
+    try:
+        return await asyncio.to_thread(services.docker.start_container, container)
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool="docker_start_container").model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return _err("docker_start_container", exc)
+
+
+async def docker_remove_container(
+    container: str,
+    force: bool,
+    confirm: bool,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Remove/delete a Docker container with ``docker rm`` (destructive).
+
+    Args:
+        container: Container name or ID.
+        force: When ``true``, also kill the container if it is running (``-f``).
+        confirm: MUST be ``true`` and only after the user has explicitly agreed.
+    """
+    services = get_services()
+    if not confirm:
+        return ConfirmationRequired(
+            action="docker.remove_container",
+            target=container,
+            prompt=(
+                f"I am about to REMOVE Docker container {container!r} on "
+                f"{services.settings.vm_host}"
+                + (" (force-killing it first)" if force else "")
+                + ". This cannot be undone. Do you want to continue?"
+            ),
+            reversible=False,
+        ).model_dump()
+    if services.settings.read_only_mode:
+        return _read_only("docker_remove_container")
+    try:
+        return await asyncio.to_thread(
+            services.docker.remove_container, container, force=force
+        )
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool="docker_remove_container").model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return _err("docker_remove_container", exc)
+
+
+async def docker_pull_image(
+    image: str,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Pull a Docker image with ``docker pull``. Blocked in READ_ONLY_MODE.
+
+    Args:
+        image: Image reference, e.g. ``nginx:latest`` or ``org/app:1.2.3``.
+    """
+    services = get_services()
+    if services.settings.read_only_mode:
+        return _read_only("docker_pull_image")
+    try:
+        return await asyncio.to_thread(services.docker.pull_image, image)
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool="docker_pull_image").model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return _err("docker_pull_image", exc)
+
+
+async def docker_run_container(
+    image: str,
+    name: str,
+    ports: str,
+    env: str,
+    confirm: bool,
+    tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Create and start a new container with ``docker run -d`` (destructive).
+
+    Args:
+        image: Image reference, e.g. ``nginx:latest``.
+        name: Container name. Pass an empty string to let Docker auto-name it.
+        ports: Comma-separated ``host:container`` mappings, e.g.
+            ``"8080:80,4500:4500"``. Pass an empty string for none.
+        env: Comma-separated ``KEY=value`` pairs, e.g. ``"TZ=UTC,DEBUG=1"``.
+            Pass an empty string for none.
+        confirm: MUST be ``true`` and only after the user has explicitly agreed.
+    """
+    services = get_services()
+    name = (name or "").strip()
+    ports = (ports or "").strip()
+    env = (env or "").strip()
+    if not confirm:
+        detail = ", ".join(
+            filter(
+                None,
+                [
+                    f"image={image}",
+                    f"name={name}" if name else "",
+                    f"ports={ports}" if ports else "",
+                    f"env={env}" if env else "",
+                ],
+            )
+        )
+        return ConfirmationRequired(
+            action="docker.run_container",
+            target=name or image,
+            prompt=(
+                f"I am about to CREATE and START a new container on "
+                f"{services.settings.vm_host} ({detail}). Do you want to continue?"
+            ),
+            reversible=True,
+        ).model_dump()
+    if services.settings.read_only_mode:
+        return _read_only("docker_run_container")
+    try:
+        return await asyncio.to_thread(
+            services.docker.run_container,
+            image,
+            name=name or None,
+            ports=ports or None,
+            env=env or None,
+        )
+    except ValueError as exc:
+        return ToolError(error=str(exc), tool="docker_run_container").model_dump()
+    except (DockerNotAvailable, SSHConnectionError) as exc:
+        return _err("docker_run_container", exc)
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -254,6 +426,11 @@ def build_docker_tools() -> List[FunctionTool]:
         FunctionTool(func=docker_health),
         FunctionTool(func=docker_restart_container),
         FunctionTool(func=docker_prune),
+        FunctionTool(func=docker_stop_container),
+        FunctionTool(func=docker_start_container),
+        FunctionTool(func=docker_remove_container),
+        FunctionTool(func=docker_pull_image),
+        FunctionTool(func=docker_run_container),
     ]
 
 
@@ -307,8 +484,13 @@ __all__ = [
     "docker_inspect",
     "docker_logs",
     "docker_prune",
+    "docker_pull_image",
+    "docker_remove_container",
     "docker_restart_container",
+    "docker_run_container",
     "docker_running_containers",
+    "docker_start_container",
     "docker_stats",
+    "docker_stop_container",
     "docker_stopped_containers",
 ]
