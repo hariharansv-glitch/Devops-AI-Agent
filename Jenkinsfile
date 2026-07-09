@@ -117,6 +117,36 @@ pipeline {
                     sh '''
                     set -e
 
+                    # Diagnostics: show what Jenkins actually gave us BEFORE
+                    # we try to use it. The full path is masked by Jenkins
+                    # (Jenkins auto-masks any variable value that contains a
+                    # credential), so we log the SIZE and the HEADER LINE only
+                    # (headers like `-----BEGIN RSA PRIVATE KEY-----` are not
+                    # secret and are the fastest way to spot a malformed key).
+                    SRC_SIZE=$(stat -c '%s' "$VM_KEY_FILE" 2>/dev/null || echo 0)
+                    SRC_HEADER=$(head -c 40 "$VM_KEY_FILE" 2>/dev/null | tr -d '\r' | head -1)
+                    echo "Source key size: ${SRC_SIZE} bytes"
+                    echo "Source key header: ${SRC_HEADER}"
+
+                    if [ "${SRC_SIZE}" = "0" ]; then
+                        cat >&2 <<'MSG'
+ERROR: The 'opc' Jenkins credential has an EMPTY private-key body.
+
+Jenkins wrote a 0-byte file, which means the credential exists (Username
+saved fine) but the "Private Key" field never got the key contents.
+
+Fix (this is a known Jenkins UX trap when *updating* SSH credentials):
+  1. Manage Jenkins > Credentials > Global > 'opc' > delete it.
+  2. Add a fresh credential with the SAME ID 'opc'.
+  3. Kind: SSH Username with private key.  Username: opc.
+  4. Private Key: click "Enter directly" and paste the ENTIRE file
+     including the -----BEGIN RSA PRIVATE KEY----- and
+     -----END RSA PRIVATE KEY----- lines.
+  5. Save, then re-run this pipeline.
+MSG
+                        exit 1
+                    fi
+
                     # Stage the private key in the workspace with world-read
                     # (644) so we can stream it to the helper container. 644 is
                     # safe because the workspace is ephemeral and paramiko
@@ -124,10 +154,12 @@ pipeline {
                     mkdir -p keys
                     install -m 644 "$VM_KEY_FILE" keys/target_vm_key
 
-                    # Sanity-check: an empty key file would produce a very
-                    # confusing SSH failure later, so fail fast right here.
-                    if [ ! -s keys/target_vm_key ]; then
-                        echo "ERROR: keys/target_vm_key is empty. The 'opc' Jenkins credential is likely missing the private key body." >&2
+                    # Belt & suspenders: reject anything that doesn't look like
+                    # a PEM/OpenSSH private key. Catches the rare case where
+                    # someone pasted a *public* key or a random blob.
+                    if ! head -1 keys/target_vm_key | grep -qE '^-----BEGIN( OPENSSH| RSA| EC| DSA| ENCRYPTED)? PRIVATE KEY-----$'; then
+                        echo "ERROR: keys/target_vm_key does not start with a PEM/OpenSSH PRIVATE KEY header." >&2
+                        echo "First line was: $(head -1 keys/target_vm_key)" >&2
                         exit 1
                     fi
 
