@@ -20,9 +20,12 @@
 // web UI at /.
 //
 // ---- Jenkins credentials this pipeline expects ----
-//   * groq-api-key  (Secret text)                     -> GROQ_API_KEY
-//   * opc           (SSH Username with private key)   -> the key + user
-//                    used by the agent to SSH into the managed VM (opc@VM).
+//   * groq-api-key      (Secret text) -> GROQ_API_KEY
+//   * opc-ssh-key-file  (Secret file) -> the target-VM SSH private key.
+//     Uploaded as a file (NOT typed into a text area) to side-step the
+//     "SSH Username with private key" UI trap where updates silently
+//     discard the pasted body. The username is hard-wired to
+//     AGENT_VM_USER below.
 // Create them under: Manage Jenkins > Credentials. If you use Gemini
 // instead of Groq, swap the credential for a `google-api-key` secret and
 // set MODEL_NAME accordingly below.
@@ -107,11 +110,7 @@ pipeline {
                 // Bind the target-VM SSH key and the LLM API key from Jenkins
                 // credentials so nothing sensitive is ever committed or echoed.
                 withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'opc',
-                        keyFileVariable: 'VM_KEY_FILE',
-                        usernameVariable: 'VM_KEY_USER'
-                    ),
+                    file(credentialsId: 'opc-ssh-key-file', variable: 'VM_KEY_FILE'),
                     string(credentialsId: 'groq-api-key', variable: 'GROQ_API_KEY')
                 ]) {
                     sh '''
@@ -130,19 +129,16 @@ pipeline {
 
                     if [ "${SRC_SIZE}" = "0" ]; then
                         cat >&2 <<'MSG'
-ERROR: The 'opc' Jenkins credential has an EMPTY private-key body.
+ERROR: Jenkins wrote a 0-byte file for the 'opc-ssh-key-file' credential.
 
-Jenkins wrote a 0-byte file, which means the credential exists (Username
-saved fine) but the "Private Key" field never got the key contents.
-
-Fix (this is a known Jenkins UX trap when *updating* SSH credentials):
-  1. Manage Jenkins > Credentials > Global > 'opc' > delete it.
-  2. Add a fresh credential with the SAME ID 'opc'.
-  3. Kind: SSH Username with private key.  Username: opc.
-  4. Private Key: click "Enter directly" and paste the ENTIRE file
-     including the -----BEGIN RSA PRIVATE KEY----- and
-     -----END RSA PRIVATE KEY----- lines.
-  5. Save, then re-run this pipeline.
+Fix:
+  1. Manage Jenkins > Credentials > System > Global credentials.
+  2. Delete any pre-existing 'opc-ssh-key-file' entry.
+  3. Add credential > Kind: 'Secret file'.
+        ID:   opc-ssh-key-file
+        File: click 'Choose File' and select the target-VM private key
+              on your local machine (e.g. ssh-key-2026-06-11.key).
+  4. Save, then re-run this pipeline.
 MSG
                         exit 1
                     fi
@@ -181,9 +177,9 @@ MSG
                             echo "Key written to volume ($(wc -c < /dest/target_vm_key) bytes)"
                         ' < keys/target_vm_key
 
-                    # Prefer the username attached to the credential; fall back
-                    # to the pipeline default if the credential has none.
-                    SSH_USER="${VM_KEY_USER:-${AGENT_VM_USER}}"
+                    # The Secret-file credential contains only the key body;
+                    # the username lives in the pipeline environment block.
+                    SSH_USER="${AGENT_VM_USER}"
 
                     cat > .env <<EOF
 # ---- LLM provider ----
