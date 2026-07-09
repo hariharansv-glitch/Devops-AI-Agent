@@ -2,13 +2,18 @@
 # AI DevOps Assistant - Docker Compose
 # =============================================================================
 # Usage:
-#   1. Copy .env.example to .env and fill in your Gemini key + VM credentials.
+#   1. Copy .env.example to .env and fill in your LLM key + VM credentials.
 #   2. docker compose up --build
-#   3. Open http://localhost:8000/docs for the OpenAPI UI.
+#   3. Open http://localhost:5500/ for the web UI (or /docs for OpenAPI).
 #
-# If you use an SSH private key for the VM, mount it read-only into the
-# container and point VM_PRIVATE_KEY at the mounted path (see below).
+# If you use an SSH private key for the VM, drop it into ./keys/ (mounted
+# read-only below) and point VM_PRIVATE_KEY at the in-container path, e.g.
+# VM_PRIVATE_KEY=/keys/id_key. The Jenkins pipeline does this automatically.
 # =============================================================================
+
+# Stable project name so containers/networks get predictable names and the
+# CI pipeline can address them reliably.
+name: devops-ai-agent
 
 services:
   devops-assistant:
@@ -16,26 +21,31 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ai-devops-assistant:latest
-    container_name: ai-devops-assistant
+    container_name: devops-ai-agent
     restart: unless-stopped
     env_file:
       - .env
+    # The app listens on 5500 inside the container. HOST_PORT (default 5500)
+    # is the port published on the host; override it in .env if 5500 is taken.
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${HOST_PORT:-5500}:5500"
+    # Ensure the app binds to 5500 regardless of what API_PORT says in .env.
+    environment:
+      API_HOST: "0.0.0.0"
+      API_PORT: "5500"
     volumes:
       # Persist logs on the host.
       - ./logs:/app/logs
-      # OPTIONAL: mount a read-only SSH private key at a known path.
-      # Uncomment the next two lines and set VM_PRIVATE_KEY=/keys/id_ed25519
-      # in your .env file to use it.
-      # - ./keys:/keys:ro
+      # SSH private key(s) for the target VM, mounted read-only. Set
+      # VM_PRIVATE_KEY=/keys/<filename> in .env to use one.
+      - ./keys:/keys:ro
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5500/healthz', timeout=3).status==200 else 1)",
         ]
       interval: 30s
       timeout: 5s
