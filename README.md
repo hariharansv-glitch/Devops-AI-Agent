@@ -152,10 +152,28 @@ Devops-AI-Agent/
 
 - **Python 3.12** (3.10+ works, 3.12 is the target).
 - A **Google Gemini API key** (from [Google AI Studio](https://aistudio.google.com/app/apikey))
-  or a **Vertex AI** project with ADC configured.
-- **SSH access** to a Linux VM you want to inspect (password or private key).
+  or a **Vertex AI** project with ADC configured. **A Google Cloud VM is
+  NOT required** — Gemini is called from wherever you run the assistant.
+- **SSH access to any Linux VM you want to inspect.** The assistant is
+  cloud-agnostic; see the [Target VM cheatsheet](#target-vm-cheatsheet)
+  below for common providers (Oracle Cloud, Oracle VirtualBox, AWS,
+  DigitalOcean, self-hosted, ...).
 - Optional: **Docker** installed on the remote VM if you want to use the
   Docker tools; **Jenkins** installed if you want the Jenkins tools.
+
+### Target VM cheatsheet
+
+| Provider                             | `VM_HOST`                | `VM_PORT` | `VM_USER`                     | Auth                             |
+| ------------------------------------ | ------------------------ | --------- | ----------------------------- | -------------------------------- |
+| **Oracle Cloud Infrastructure (OCI)**| Instance public IP       | `22`      | `opc` (Oracle Linux) / `ubuntu` | Private key from OCI console     |
+| **Oracle VirtualBox** (NAT + forward)| `127.0.0.1`              | `2222`    | Whatever you configured        | Password (fine locally) or key   |
+| **AWS EC2**                          | Public DNS / EIP         | `22`      | `ec2-user` / `ubuntu` / `admin`| `.pem` file from EC2             |
+| **DigitalOcean / Hetzner / Linode**  | Droplet IP               | `22`      | `root` or `ubuntu`             | Uploaded SSH key                 |
+| **Google Compute Engine**            | External IP              | `22`      | Your Google login username     | OS Login / metadata key          |
+| **Raspberry Pi / self-hosted**       | LAN IP                   | `22`      | Whatever you configured        | Password or key                  |
+
+The assistant only needs the SSH endpoint to be reachable from wherever it
+runs. Nothing about the target VM's provider is inspected or assumed.
 
 ---
 
