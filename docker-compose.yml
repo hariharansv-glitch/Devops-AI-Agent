@@ -34,8 +34,13 @@ services:
       API_HOST: "0.0.0.0"
       API_PORT: "5500"
     volumes:
-      # Persist logs on the host.
-      - ./logs:/app/logs
+      # Logs live in a NAMED VOLUME (not a bind mount) so the volume driver
+      # inherits the image's `app:app` ownership. A bind mount to ./logs would
+      # be created as root on the host, which the non-root container user
+      # (uid 1000) cannot write to. To tail logs from the host, use
+      # `docker compose logs -f` or `docker exec devops-ai-agent tail -f
+      # /app/logs/devops_agent.log`.
+      - devops_logs:/app/logs
       # SSH private key(s) for the target VM, mounted read-only. Set
       # VM_PRIVATE_KEY=/keys/<filename> in .env to use one.
       - ./keys:/keys:ro
@@ -56,3 +61,6 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+volumes:
+  devops_logs:

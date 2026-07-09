@@ -111,9 +111,15 @@ pipeline {
                     set -e
 
                     # Copy the private key into ./keys (mounted read-only into
-                    # the container at /keys by docker-compose.yml).
+                    # the container at /keys by docker-compose.yml). The file is
+                    # world-readable (644) *inside the workspace* so the
+                    # container's non-root `app` user (uid 1000) can read it
+                    # regardless of which uid the Jenkins agent runs as. This
+                    # is safe because the workspace is ephemeral, wiped in the
+                    # `post { always }` block, and the mount is read-only.
+                    # Paramiko (unlike OpenSSH) does not enforce mode 600.
                     mkdir -p keys
-                    install -m 600 "$VM_KEY_FILE" keys/target_vm_key
+                    install -m 644 "$VM_KEY_FILE" keys/target_vm_key
 
                     # Prefer the username attached to the credential; fall back
                     # to the pipeline default if the credential has none.
