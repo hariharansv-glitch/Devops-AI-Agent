@@ -35,8 +35,19 @@ logger = get_logger(__name__)
 
 DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
     {
+        # Docker lifecycle - all of these mutate host state and must be
+        # gated by READ_ONLY_MODE at the callback layer, not just inside
+        # each tool. Kept in lockstep with `build_docker_tools()`.
         "docker_restart_container",
+        "docker_stop_container",
+        "docker_remove_container",
+        "docker_run_container",
+        "docker_pull_image",
         "docker_prune",
+        # Note: docker_start_container is intentionally NOT here. Starting
+        # a stopped container is reversible and safe to run in read-only
+        # mode; the tool still runs its own read-only check for parity.
+        # Jenkins lifecycle
         "jenkins_restart",
     }
 )
