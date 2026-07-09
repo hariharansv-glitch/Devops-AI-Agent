@@ -46,9 +46,13 @@ services:
       # `docker compose logs -f` or `docker exec devops-ai-agent tail -f
       # /app/logs/devops_agent.log`.
       - devops_logs:/app/logs
-      # SSH private key(s) for the target VM, mounted read-only. Set
-      # VM_PRIVATE_KEY=/keys/<filename> in .env to use one.
-      - ./keys:/keys:ro
+      # SSH private key(s) for the target VM live in a NAMED VOLUME. Using a
+      # bind mount to ./keys would tie the container's lifetime to the CI
+      # workspace: `post { always } { rm -rf keys }` would evict the key from
+      # the running container. The Jenkinsfile populates this volume via a
+      # short-lived helper container. Set VM_PRIVATE_KEY=/keys/target_vm_key
+      # in .env to use it.
+      - devops_keys:/keys:ro
     healthcheck:
       test:
         [
@@ -69,3 +73,4 @@ services:
 
 volumes:
   devops_logs:
+  devops_keys:

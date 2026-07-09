@@ -1,0 +1,11 @@
+Persist SSH key in named Docker volume so it survives workspace cleanup
+
+The Jenkins pipeline's `post { always }` step wipes the workspace, which
+was evicting the bind-mounted SSH key from the running container mid-run
+(readyz reported "VM_PRIVATE_KEY points to non-existent path"). Copy the
+key into a named `devops_keys` volume via a busybox helper container so
+its lifetime is tied to Docker's storage, not the CI workspace.
+
+Also uses network_mode: host so the container can reach the VM's sshd via
+127.0.0.1, avoiding OCI/cloud hairpin NAT issues when the container tries
+to hit its own host's public IP.

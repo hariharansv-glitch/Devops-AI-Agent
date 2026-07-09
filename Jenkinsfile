@@ -117,16 +117,30 @@ pipeline {
                     sh '''
                     set -e
 
-                    # Copy the private key into ./keys (mounted read-only into
-                    # the container at /keys by docker-compose.yml). The file is
-                    # world-readable (644) *inside the workspace* so the
-                    # container's non-root `app` user (uid 1000) can read it
-                    # regardless of which uid the Jenkins agent runs as. This
-                    # is safe because the workspace is ephemeral, wiped in the
-                    # `post { always }` block, and the mount is read-only.
-                    # Paramiko (unlike OpenSSH) does not enforce mode 600.
+                    # Stage the private key in the workspace with world-read
+                    # (644) so the busybox helper below can copy it. We use 644
+                    # instead of 600 because paramiko (unlike OpenSSH) does not
+                    # enforce mode, and the file only lives on disk for the
+                    # duration of this stage before being copied into a Docker
+                    # volume.
                     mkdir -p keys
                     install -m 644 "$VM_KEY_FILE" keys/target_vm_key
+
+                    # Copy the key into a NAMED VOLUME (devops_keys) so it
+                    # survives the `post { always }` workspace cleanup. The
+                    # volume is mounted read-only into the app container by
+                    # docker-compose.yml. `docker volume create` is idempotent,
+                    # so this is safe on every rebuild. Setting mode 644 on the
+                    # copy inside the volume keeps it readable by the container's
+                    # non-root `app` user (uid 1000) regardless of host uid.
+                    docker volume create devops_keys >/dev/null
+                    docker run --rm \
+                        -v devops_keys:/dest \
+                        -v "$(pwd)/keys":/src:ro \
+                        busybox:latest sh -c '
+                            cp /src/target_vm_key /dest/target_vm_key &&
+                            chmod 644 /dest/target_vm_key
+                        '
 
                     # Prefer the username attached to the credential; fall back
                     # to the pipeline default if the credential has none.
