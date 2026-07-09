@@ -72,5 +72,13 @@ services:
         max-file: "5"
 
 volumes:
+  # Pinning explicit `name:` values prevents Compose from prefixing the
+  # volume name with the project (which would produce
+  # `devops-ai-agent_devops_keys` and cause a collision with the volume
+  # of the same short name that the Jenkins pipeline writes to via
+  # `docker volume create devops_keys`). Keeping the names in lockstep
+  # is what actually makes the CI-populated key visible to the app.
   devops_logs:
+    name: devops_logs
   devops_keys:
+    name: devops_keys
