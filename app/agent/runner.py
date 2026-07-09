@@ -13,6 +13,7 @@ This module is deliberately I/O-friendly:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
