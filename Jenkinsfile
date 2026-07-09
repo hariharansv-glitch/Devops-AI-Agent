@@ -50,7 +50,14 @@ pipeline {
         MODEL_NAME = 'groq/llama-3.3-70b-versatile'
 
         // ---- Target Linux VM the agent inspects over SSH ----
-        AGENT_VM_HOST = '140.245.254.149'
+        // Because docker-compose runs the container with `network_mode: host`,
+        // the container shares the VM's network stack — so the VM is reachable
+        // as 127.0.0.1 from inside the container. This side-steps the OCI /
+        // cloud-NAT hairpin problem where hitting the VM's own PUBLIC IP from
+        // inside a Docker bridge network fails. If you point this pipeline at
+        // a *different* VM later, drop `network_mode: host` from compose and
+        // set AGENT_VM_HOST to that VM's reachable address.
+        AGENT_VM_HOST = '127.0.0.1'
         AGENT_VM_USER = 'opc'
         AGENT_VM_PORT = '22'
 

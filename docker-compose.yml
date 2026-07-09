@@ -25,10 +25,15 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # The app listens on 5500 inside the container. HOST_PORT (default 5500)
-    # is the port published on the host; override it in .env if 5500 is taken.
-    ports:
-      - "${HOST_PORT:-5500}:5500"
+    # HOST NETWORKING (Linux only): the agent inspects the very VM it runs on,
+    # so it needs to reach the host's SSH daemon. On a default bridge network
+    # the container can't hairpin back to the host's *public* IP on cloud
+    # VMs (OCI, AWS, etc.), and even 172.17.0.1 isn't always routable to sshd.
+    # `network_mode: host` gives the container the host's network stack —
+    # 127.0.0.1 inside == the host — so SSH, docker over SSH, etc. all work.
+    # The app binds to 0.0.0.0:5500 directly on the host (no port publish),
+    # so `ports:` is intentionally omitted (host mode ignores it anyway).
+    network_mode: host
     # Ensure the app binds to 5500 regardless of what API_PORT says in .env.
     environment:
       API_HOST: "0.0.0.0"
