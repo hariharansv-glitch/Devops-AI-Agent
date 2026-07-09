@@ -30,11 +30,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ------------------------------------------------------------------ Gemini
+    # ------------------------------------------------------------- LLM provider
+    # The MODEL_NAME prefix decides which provider is used:
+    #   - "gemini-*"    -> Google Gemini (needs google_api_key OR Vertex AI)
+    #   - "groq/*"      -> Groq via LiteLLM (needs groq_api_key)
+    #   - "openai/*"    -> OpenAI via LiteLLM (needs OPENAI_API_KEY)
+    #   - "anthropic/*" -> Anthropic via LiteLLM (needs ANTHROPIC_API_KEY)
     google_api_key: Optional[str] = Field(default=None)
     google_genai_use_vertexai: bool = Field(default=False)
     google_cloud_project: Optional[str] = Field(default=None)
     google_cloud_location: str = Field(default="us-central1")
+    groq_api_key: Optional[str] = Field(default=None)
     model_name: str = Field(default="gemini-2.5-flash")
 
     # ---------------------------------------------------------------------- VM
@@ -92,6 +98,25 @@ class Settings(BaseSettings):
         """Return ``True`` when Gemini calls should be routed through Vertex."""
         return bool(self.google_genai_use_vertexai)
 
+    @property
+    def llm_provider(self) -> str:
+        """Return the provider key inferred from :attr:`model_name`.
+
+        Examples
+        --------
+        - ``"gemini-2.5-flash"``            -> ``"gemini"``
+        - ``"groq/llama-3.3-70b-versatile"``-> ``"groq"``
+        - ``"openai/gpt-4o-mini"``          -> ``"openai"``
+        """
+        name = (self.model_name or "").strip().lower()
+        if not name:
+            return "gemini"
+        if name.startswith("gemini"):
+            return "gemini"
+        if "/" in name:
+            return name.split("/", 1)[0]
+        return "gemini"
+
     # -------------------------------------------------------------- Validation
     @field_validator("log_level")
     @classmethod
@@ -117,13 +142,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_auth_material(self) -> "Settings":
-        """Ensure at least one usable Gemini credential source is configured.
+        """Ensure the credential matching the chosen LLM provider is present.
 
-        We only warn (not raise) here because unit tests and dry-runs should be
-        able to import the settings without providing real credentials.
+        The only hard requirement raised here is the Vertex AI one - other
+        missing credentials are surfaced later by the runner so that unit
+        tests and dry-runs can import :class:`Settings` without real keys.
         """
         if self.uses_vertex_ai and not self.google_cloud_project:
-            # Only enforce when running under Vertex.
             raise ValueError(
                 "GOOGLE_CLOUD_PROJECT must be set when GOOGLE_GENAI_USE_VERTEXAI=TRUE"
             )

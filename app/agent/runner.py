@@ -24,6 +24,32 @@ from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService
 from google.adk.memory import BaseMemoryService
 from google.genai import types
+from google.genai import errors as genai_errors
+
+# --- Transient-error retry policy -------------------------------------------
+# Google's Gemini endpoints occasionally return 5xx / UNAVAILABLE when a
+# specific model is under sudden load. Those are safe to retry — the request
+# never reached tool execution — so we back off briefly and try again a
+# couple of times before surfacing the error to the caller.
+_TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 529}
+_TRANSIENT_RETRY_BACKOFF_S = (1.5, 3.5, 7.0)  # up to 3 retries; ~12s max wait
+
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a Gemini 5xx / UNAVAILABLE style failure."""
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(code, int) and code in _TRANSIENT_STATUS_CODES:
+        return True
+    # ADK wraps 5xx in its own exception types; match by message as fallback.
+    msg = str(exc).lower()
+    return (
+        "unavailable" in msg
+        or "503" in msg
+        or "deadline exceeded" in msg
+        or "internal error" in msg
+    )
 
 from app.agent.callbacks import tool_calls_from_state
 from app.agent.instructions import AGENT_NAME
@@ -123,13 +149,48 @@ class AgentService:
         content = types.Content(role="user", parts=[types.Part(text=message)])
 
         final_text = ""
-        async for event in self._runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=content,
-        ):
-            if event.is_final_response():
-                final_text = _extract_text(event)
+        attempt = 0
+        while True:
+            try:
+                final_text = ""
+                async for event in self._runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=content,
+                ):
+                    # Gemini 2.5 thinking-mode responses can raise the
+                    # ``is_final_response`` flag on multiple events — the last
+                    # one is often a thought-completion marker with no visible
+                    # text. Keeping only non-empty candidates avoids wiping
+                    # out the real answer.
+                    if event.is_final_response():
+                        candidate = _extract_text(event)
+                        if candidate:
+                            final_text = candidate
+                break
+            except Exception as exc:  # noqa: BLE001 - selective retry below
+                if attempt >= len(_TRANSIENT_RETRY_BACKOFF_S) or not _is_transient_llm_error(exc):
+                    raise
+                delay = _TRANSIENT_RETRY_BACKOFF_S[attempt]
+                attempt += 1
+                logger.warning(
+                    "transient LLM error, retry {n}/{total} in {d}s: {err}",
+                    n=attempt,
+                    total=len(_TRANSIENT_RETRY_BACKOFF_S),
+                    d=delay,
+                    err=str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+                )
+                await asyncio.sleep(delay)
+
+        if not final_text:
+            # Belt & suspenders: if nothing came back on ``is_final_response``,
+            # log the event shape so we can diagnose without burning quota on
+            # blind retries. This should be rare after the extractor fix above.
+            logger.warning(
+                "empty final response session={sid} user={uid}",
+                sid=session_id,
+                uid=user_id,
+            )
 
         duration_ms = (time.perf_counter() - started) * 1000
         state = await read_state(
@@ -213,8 +274,16 @@ class AgentService:
 
     # ---------------------------------------------------------------- Internals
     def _configure_gemini_env(self) -> None:
-        """Push settings into the env vars the ADK / Gen AI SDK inspect."""
+        """Push settings into the env vars the ADK / Gen AI SDK / LiteLLM inspect.
+
+        Different providers read different environment variables. We set them
+        all defensively based on which keys are configured, so switching
+        providers is a one-line ``MODEL_NAME`` change without needing a shell
+        restart. Any credential the user didn't configure is left untouched.
+        """
         settings = self._settings
+
+        # --- Gemini / Vertex ---
         if settings.uses_vertex_ai:
             os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
             if settings.google_cloud_project:
@@ -225,6 +294,13 @@ class AgentService:
             os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
             if settings.google_api_key:
                 os.environ["GOOGLE_API_KEY"] = settings.google_api_key
+
+        # --- LiteLLM-backed providers ---
+        # LiteLLM auto-detects the credential env var from the model prefix,
+        # e.g. ``groq/...`` reads ``GROQ_API_KEY``. Push our typed setting
+        # into ``os.environ`` so LiteLLM can find it.
+        if settings.groq_api_key:
+            os.environ["GROQ_API_KEY"] = settings.groq_api_key
 
 
 # ---------------------------------------------------------------------------
@@ -274,16 +350,27 @@ def _new_session_id() -> str:
 
 
 def _extract_text(event) -> str:
-    """Return the plain-text part of an ADK event, or an empty string."""
+    """Return the visible plain-text of an ADK event, or an empty string.
+
+    Skips ``thought=True`` parts (Gemini 2.5's internal reasoning) and
+    concatenates every remaining text part. Returning only the first
+    truthy part — as the original implementation did — dropped the real
+    answer for models that emit multiple text parts (e.g. a "thought"
+    followed by the visible response).
+    """
     content = getattr(event, "content", None)
     if content is None:
         return ""
     parts = getattr(content, "parts", None) or []
+    chunks: list[str] = []
     for part in parts:
+        if getattr(part, "thought", False):
+            # Internal reasoning; not meant for the end user.
+            continue
         text = getattr(part, "text", None)
         if text:
-            return text
-    return ""
+            chunks.append(text)
+    return "".join(chunks)
 
 
 __all__ = [

@@ -7,6 +7,9 @@
 google-adk>=2.4.0,<3.0.0
 google-genai>=1.20.0
 
+# --- LiteLLM (non-Gemini providers: Groq, OpenAI, Anthropic, Ollama, ...) ---
+litellm>=1.55.0
+
 # --- Web / API ---
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
